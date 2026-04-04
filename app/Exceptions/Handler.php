@@ -40,6 +40,7 @@ class Handler extends ExceptionHandler
                 'code' => $isDebug ? class_basename($e) : 'INTERNAL_SERVER_ERROR',
                 'message' => $isDebug ? $e->getMessage() : 'Internal server error.',
                 'exception' => class_basename($e),
+                'detail' => (string) $e->getMessage(),
             ],
         ], $status);
     }
