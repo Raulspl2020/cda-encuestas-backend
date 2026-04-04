@@ -4,6 +4,7 @@ namespace App\Exceptions;
 
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Throwable;
@@ -33,10 +34,12 @@ class Handler extends ExceptionHandler
 
     public function render($request, Throwable $e)
     {
+        $requestId = (string) Str::uuid();
         $isDebug = (bool) config('app.debug');
 
         if ($e instanceof ValidationException) {
             return new JsonResponse([
+                'request_id' => $requestId,
                 'error' => [
                     'code' => 'VALIDATION_ERROR',
                     'message' => 'Validation failed.',
@@ -49,6 +52,7 @@ class Handler extends ExceptionHandler
         $message = $status === 404 ? 'Resource not found.' : 'Internal server error.';
 
         return new JsonResponse([
+            'request_id' => $requestId,
             'error' => [
                 'code' => $status === 404 ? 'NOT_FOUND' : 'INTERNAL_SERVER_ERROR',
                 'message' => $isDebug ? $e->getMessage() : $message,
