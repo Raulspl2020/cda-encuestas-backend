@@ -16,7 +16,7 @@ class FormsController extends Controller
     {
         $forms = $this->formsService->getActiveForms();
 
-        return response()->json([
+        return new JsonResponse([
             'request_id' => (string) Str::uuid(),
             'data' => ['forms' => $forms],
             'meta' => ['count' => count($forms)],
@@ -28,7 +28,7 @@ class FormsController extends Controller
         $payload = $this->formsService->getFormVersion($sid, $version);
 
         if ($payload === null) {
-            return response()->json([
+            return new JsonResponse([
                 'request_id' => (string) Str::uuid(),
                 'error' => [
                     'code' => 'FORM_VERSION_NOT_FOUND',
@@ -37,7 +37,7 @@ class FormsController extends Controller
             ], 404);
         }
 
-        return response()->json([
+        return new JsonResponse([
             'request_id' => (string) Str::uuid(),
             'data' => $payload,
         ]);

@@ -25,6 +25,6 @@ class SyncController extends Controller
 
         $result = $this->syncService->processBatch($request, $payload);
 
-        return response()->json($result['body'], $result['status_code']);
+        return new JsonResponse($result['body'], $result['status_code']);
     }
 }

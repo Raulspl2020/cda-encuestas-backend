@@ -3,6 +3,7 @@
 namespace App\Exceptions;
 
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
+use Illuminate\Http\JsonResponse;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Throwable;
 
@@ -33,7 +34,7 @@ class Handler extends ExceptionHandler
     {
         $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
 
-        return response()->json([
+        return new JsonResponse([
             'error' => [
                 'code' => 'INTERNAL_SERVER_ERROR',
                 'message' => config('app.debug') ? $e->getMessage() : 'Internal server error.',
