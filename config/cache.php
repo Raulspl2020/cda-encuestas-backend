@@ -15,7 +15,9 @@ return [
     |
     */
 
-    'default' => env('CACHE_STORE', env('CACHE_DRIVER', env('VERCEL') ? 'array' : 'file')),
+    'default' => env('VERCEL')
+        ? env('CACHE_STORE', 'array')
+        : env('CACHE_STORE', env('CACHE_DRIVER', 'file')),
 
     /*
     |--------------------------------------------------------------------------

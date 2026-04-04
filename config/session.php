@@ -18,7 +18,9 @@ return [
     |
     */
 
-    'driver' => env('SESSION_DRIVER', env('VERCEL') ? 'array' : 'file'),
+    'driver' => env('VERCEL')
+        ? env('SESSION_DRIVER', 'array')
+        : env('SESSION_DRIVER', 'file'),
 
     /*
     |--------------------------------------------------------------------------
