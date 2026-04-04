@@ -31,17 +31,13 @@ class Handler extends ExceptionHandler
 
     public function render($request, Throwable $e)
     {
-        if ($request->is('api/*') || $request->expectsJson()) {
-            $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
+        $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
 
-            return response()->json([
-                'error' => [
-                    'code' => 'INTERNAL_SERVER_ERROR',
-                    'message' => config('app.debug') ? $e->getMessage() : 'Internal server error.',
-                ],
-            ], $status);
-        }
-
-        return parent::render($request, $e);
+        return response()->json([
+            'error' => [
+                'code' => 'INTERNAL_SERVER_ERROR',
+                'message' => config('app.debug') ? $e->getMessage() : 'Internal server error.',
+            ],
+        ], $status);
     }
 }
