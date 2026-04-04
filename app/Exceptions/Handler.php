@@ -3,6 +3,7 @@
 namespace App\Exceptions;
 
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Throwable;
 
 class Handler extends ExceptionHandler
@@ -26,5 +27,21 @@ class Handler extends ExceptionHandler
         $this->reportable(function (Throwable $e) {
             //
         });
+    }
+
+    public function render($request, Throwable $e)
+    {
+        if ($request->is('api/*') || $request->expectsJson()) {
+            $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
+
+            return response()->json([
+                'error' => [
+                    'code' => 'INTERNAL_SERVER_ERROR',
+                    'message' => config('app.debug') ? $e->getMessage() : 'Internal server error.',
+                ],
+            ], $status);
+        }
+
+        return parent::render($request, $e);
     }
 }
