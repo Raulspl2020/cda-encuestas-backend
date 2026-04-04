@@ -33,11 +33,13 @@ class Handler extends ExceptionHandler
     public function render($request, Throwable $e)
     {
         $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
+        $isDebug = (bool) config('app.debug');
 
         return new JsonResponse([
             'error' => [
-                'code' => 'INTERNAL_SERVER_ERROR',
-                'message' => config('app.debug') ? $e->getMessage() : 'Internal server error.',
+                'code' => $isDebug ? class_basename($e) : 'INTERNAL_SERVER_ERROR',
+                'message' => $isDebug ? $e->getMessage() : 'Internal server error.',
+                'exception' => class_basename($e),
             ],
         ], $status);
     }
