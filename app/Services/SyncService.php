@@ -16,7 +16,8 @@ class SyncService
 {
     public function __construct(
         private readonly IdempotencyService $idempotencyService,
-        private readonly LimeSurveyAdapter $limeSurveyAdapter
+        private readonly LimeSurveyAdapter $limeSurveyAdapter,
+        private readonly SurveyFileUploadService $surveyFileUploadService,
     ) {
     }
 
@@ -172,6 +173,7 @@ class SyncService
                             'ready' => false,
                             'missing_required_codes' => [],
                             'missing_codes' => [],
+                            'question_types' => [],
                             'error' => [
                                 'code' => 'FORM_VERSION_PAYLOAD_NOT_FOUND',
                                 'message' => 'Unable to load cached form payload for mapping.',
@@ -179,7 +181,10 @@ class SyncService
                             ],
                         ];
                     } else {
-                        $preparedForms[$formKey] = $this->limeSurveyAdapter->ensureQuestionMap($sid, $version, $formPayload);
+                        $preparedForms[$formKey] = array_merge(
+                            $this->limeSurveyAdapter->ensureQuestionMap($sid, $version, $formPayload),
+                            ['question_types' => $this->buildQuestionTypeMap($formPayload)]
+                        );
                     }
                 }
 
@@ -217,7 +222,14 @@ class SyncService
                 $mappingError = null;
 
                 foreach (($interview['answers'] ?? []) as $idx => $answer) {
-                    $mapped = $this->mapAnswerToInternalRefs($sid, $version, $answer, $idx);
+                    $mapped = $this->mapAnswerToInternalRefs(
+                        $sid,
+                        $version,
+                        $interviewUuid,
+                        $prepared['question_types'] ?? [],
+                        $answer,
+                        $idx,
+                    );
                     if (isset($mapped['error'])) {
                         $mappingError = $mapped['error'];
                         break;
@@ -391,7 +403,14 @@ class SyncService
         );
     }
 
-    private function mapAnswerToInternalRefs(int $sid, string $version, array $answer, int $index): array
+    private function mapAnswerToInternalRefs(
+        int $sid,
+        string $version,
+        string $interviewUuid,
+        array $questionTypes,
+        array $answer,
+        int $index
+    ): array
     {
         $questionCodeRaw = (string) ($answer['question_code'] ?? '');
         $questionCode = $this->limeSurveyAdapter->normalizeMappingCode($questionCodeRaw);
@@ -407,6 +426,7 @@ class SyncService
 
         $value = $answer['value'] ?? null;
         $pairs = [];
+        $questionType = (string) ($questionTypes[$questionCode] ?? '');
 
         if (array_key_exists('subquestion_code', $answer) && $answer['subquestion_code'] !== null && trim((string) $answer['subquestion_code']) !== '') {
             $subCodeRaw = (string) $answer['subquestion_code'];
@@ -423,6 +443,38 @@ class SyncService
             }
 
             $pairs[$internalRef] = $this->extractAnswerValue($answer);
+            return ['pairs' => $pairs];
+        }
+
+        if ($questionType === 'file_upload') {
+            $mainRef = $this->limeSurveyAdapter->resolveInternalRef($sid, $version, $questionCode, null);
+            if (!$mainRef) {
+                return [
+                    'error' => [
+                        'code' => 'MAPPING_NOT_FOUND',
+                        'message' => 'No internal mapping found for file upload answer.',
+                        'item' => $questionCodeRaw !== '' ? $questionCodeRaw : $questionCode,
+                    ],
+                ];
+            }
+
+            try {
+                $pairs[$mainRef] = $this->surveyFileUploadService->buildLimeSurveyFileAnswerValue(
+                    $sid,
+                    $interviewUuid,
+                    $questionCode,
+                    $value,
+                );
+            } catch (\RuntimeException $e) {
+                return [
+                    'error' => [
+                        'code' => 'FILE_UPLOAD_INVALID',
+                        'message' => $e->getMessage(),
+                        'item' => $questionCodeRaw !== '' ? $questionCodeRaw : $questionCode,
+                    ],
+                ];
+            }
+
             return ['pairs' => $pairs];
         }
 
@@ -471,6 +523,25 @@ class SyncService
         $pairs[$mainRef] = $this->extractAnswerValue($answer);
 
         return ['pairs' => $pairs];
+    }
+
+    private function buildQuestionTypeMap(array $formPayload): array
+    {
+        $map = [];
+        foreach (($formPayload['questions'] ?? []) as $question) {
+            if (!is_array($question)) {
+                continue;
+            }
+
+            $code = $this->limeSurveyAdapter->normalizeMappingCode((string) ($question['code'] ?? ''));
+            if ($code === '') {
+                continue;
+            }
+
+            $map[$code] = (string) ($question['type'] ?? '');
+        }
+
+        return $map;
     }
 
     private function extractAnswerValue(array $answer): mixed
