@@ -16,6 +16,9 @@ class SyncController extends Controller
     {
         $payload = $request->validate([
             'batch_id' => ['nullable', 'string'],
+            'rescue_mode' => ['nullable', 'boolean'],
+            'rescue_optional_question_codes' => ['nullable', 'array'],
+            'rescue_optional_question_codes.*' => ['string'],
             'interviews' => ['required', 'array', 'min:1'],
             'interviews.*.interview_uuid' => ['required', 'string'],
             'interviews.*.form_sid' => ['required', 'integer'],

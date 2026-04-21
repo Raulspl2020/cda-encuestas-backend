@@ -65,3 +65,52 @@ Cambios clave:
 - Se eliminan errores 500 asociados a provider/view y a escritura en paths no permitidos.
 - CORS queda funcional para endpoints `api/v1` consumidos desde Flutter Web.
 - Se mejora trazabilidad de errores mediante payload JSON uniforme y `request_id`.
+
+## 2026-04-21 - Soporte file_upload, resiliencia de sync y recuperacion de contrato API mobile
+
+### Descripcion tecnica del cambio
+
+- Se incorporo soporte estructural para preguntas LimeSurvey tipo `|` (`file_upload`) en backend puente.
+- Se agrego endpoint multipart para carga previa de archivos (`POST /api/v1/uploads/survey-file`) con devolucion de `file_token` y metadata.
+- Se implemento pipeline de resolucion de archivos en sincronizacion:
+  - resolucion por `file_token`,
+  - copia al arbol de uploads de LimeSurvey,
+  - construccion del JSON de respuesta compatible con `Response::getFiles()` de LimeSurvey.
+- Se agrego tabla auxiliar `survey_upload_files` para trazabilidad del archivo entre upload previo y sync final.
+- Se corrigio validacion de payload en sync para no descartar `answers.*.value`, evitando inserciones vacias.
+- Se reforzo serializacion de formularios fallback:
+  - mapeo explicito de `raw_type '|'` a `file_upload`,
+  - exposicion de `raw_type` y `supports_file_upload` para el cliente,
+  - normalizacion de `attributes` vacio en contrato API.
+- Se aplicaron ajustes de robustez en cache/version de formularios para reducir desalineaciones entre payload cacheado y estructura live.
+
+### Modulos afectados
+
+- API routing (`routes/api.php`)
+- Controladores HTTP (`FormsController`, nuevo `SurveyUploadController`, `SyncController`)
+- Servicios de dominio (`SyncService`, nuevo `SurveyFileUploadService`, `FormsService`, `LimeSurveyAdapter`)
+- Persistencia Eloquent (nuevo modelo `SurveyUploadFile`)
+- Migraciones (`survey_upload_files`)
+- Operacion CLI (`LimeSurveyRebuildMapCommand`)
+
+### Archivos modificados
+
+- `app/Http/Controllers/SyncController.php`
+- `app/Http/Controllers/FormsController.php`
+- `app/Http/Controllers/SurveyUploadController.php` (nuevo)
+- `app/Services/SyncService.php`
+- `app/Services/FormsService.php`
+- `app/Services/SurveyFileUploadService.php` (nuevo)
+- `app/Adapters/LimeSurveyAdapter.php`
+- `app/Models/SurveyUploadFile.php` (nuevo)
+- `database/migrations/2026_04_21_000007_create_survey_upload_files_table.php` (nuevo)
+- `app/Console/Commands/LimeSurveyRebuildMapCommand.php`
+- `routes/api.php`
+
+### Impacto tecnico
+
+- Habilita contrato backend para encuestas con preguntas de archivo sin romper descarga de formulario en mobile.
+- Reduce riesgo de perdida silenciosa de datos al preservar `answers.*.value` durante validacion HTTP.
+- Introduce trazabilidad y control de estado del archivo entre upload previo y confirmacion final de sync.
+- Mantiene compatibilidad con estrategia de idempotencia por `interview_uuid`.
+- Riesgo operativo abierto: en runtime serverless (Vercel) la escritura hacia filesystem LimeSurvey requiere configuracion de infraestructura/almacenamiento compatible para cerrar E2E de adjuntos.

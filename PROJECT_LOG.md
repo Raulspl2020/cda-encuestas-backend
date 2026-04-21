@@ -79,3 +79,49 @@
 
 - Confirmar ciclo E2E en campo con APK final (captura offline -> sync -> verificacion en LimeSurvey).
 - Mantener checklist operativo de Vercel (variables + deploy promocionado) para futuras iteraciones.
+
+## Ultima sesion de trabajo (2026-04-21)
+
+- Objetivo: recuperar consistencia de sincronizacion en produccion, habilitar soporte de preguntas tipo archivo (`|`) y estabilizar contrato API para mobile.
+
+## Cambios realizados
+
+- Se desplegaron cambios en `main` para hardening de sync y nuevos flujos de upload:
+  - commits relevantes: `07e1249`, `3c1b8f0`.
+- Se agrego endpoint `POST /api/v1/uploads/survey-file` para carga previa de archivos de encuesta.
+- Se implemento servicio dedicado para manejo de archivos de encuestas:
+  - almacenamiento temporal,
+  - tokenizacion (`file_token`),
+  - conversion a formato JSON esperado por LimeSurvey para preguntas `|`.
+- Se extendio `SyncService` para resolver respuestas `file_upload` y transformar `file_token` a payload final LimeSurvey.
+- Se agrego persistencia de uploads en tabla auxiliar (`survey_upload_files`) y se ejecuto migracion.
+- Se corrigio validacion de sync batch para preservar `answers.*.value`/`response`/`subquestion_code`.
+- Se reforzo serializacion de formularios para cliente mobile:
+  - mapeo explicito de `| -> file_upload`,
+  - inclusion de `raw_type` y `supports_file_upload`.
+- Se valido en produccion:
+  - `GET /api/v1/forms/833381/versions/20260417201508` responde `200`,
+  - `POST /api/v1/sync/responses/batch` persiste valores en tabla LS,
+  - `POST /api/v1/uploads/survey-file` expone endpoint pero requiere ajuste de entorno para evitar `500` en runtime serverless.
+
+## Estado actual del proyecto
+
+- Backend en Vercel actualizado con fixes de sync y soporte base para `file_upload`.
+- Contrato de formulario para SID `833381` ya expone tipo `file_upload` para `G02Q14`.
+- Flujo de sync textual/opciones estable y persistiendo datos en LimeSurvey.
+- Flujo de upload de archivos implementado a nivel de codigo, pendiente cierre de configuracion de infraestructura productiva (`LS_UPLOAD_DIR` / acceso FS compatible).
+
+## Trabajo en curso
+
+- Ajuste final de despliegue para normalizar `attributes` vacio como objeto en todas las respuestas API productivas.
+- Diagnostico operativo de `500` en `/uploads/survey-file` bajo Vercel serverless (storage y permisos/ruta de archivos LS).
+- Validacion E2E completa de file upload (adjuntar -> sync -> visualizacion en LimeSurvey).
+
+## Pendientes inmediatos
+
+- Forzar redeploy en Vercel del ultimo commit productivo y confirmar version activa por fecha/hash.
+- Confirmar variables de entorno y estrategia de storage para archivos:
+  - `LS_UPLOAD_DIR`
+  - `SURVEY_UPLOAD_DISK`
+- Ejecutar prueba controlada de `POST /api/v1/uploads/survey-file` con archivo real y revisar logs de error.
+- Validar en LimeSurvey que los adjuntos de `G02Q14` queden visibles/descargables desde respuestas.

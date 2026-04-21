@@ -80,6 +80,8 @@ class SyncService
         ]);
 
         $result = DB::transaction(function () use ($payload, $idempotencyKey, $device, $requestId) {
+            $rescueContext = $this->buildRescueContext($payload);
+
             $batch = SyncBatch::query()->create([
                 'batch_uuid' => (string) Str::uuid(),
                 'idempotency_key' => $idempotencyKey,
@@ -229,6 +231,7 @@ class SyncService
                         $prepared['question_types'] ?? [],
                         $answer,
                         $idx,
+                        $rescueContext,
                     );
                     if (isset($mapped['error'])) {
                         $mappingError = $mapped['error'];
@@ -409,7 +412,8 @@ class SyncService
         string $interviewUuid,
         array $questionTypes,
         array $answer,
-        int $index
+        int $index,
+        array $rescueContext = []
     ): array
     {
         $questionCodeRaw = (string) ($answer['question_code'] ?? '');
@@ -433,6 +437,18 @@ class SyncService
             $subCode = $this->limeSurveyAdapter->normalizeMappingCode($subCodeRaw);
             $internalRef = $this->limeSurveyAdapter->resolveInternalRef($sid, $version, $questionCode, $subCode);
             if (!$internalRef) {
+                if ($this->shouldIgnoreMissingMappingInRescue($questionCode, $subCode, $rescueContext)) {
+                    Log::warning('Rescue mode: ignored missing subquestion mapping.', [
+                        'sid' => $sid,
+                        'version' => $version,
+                        'question_code' => $questionCode,
+                        'subquestion_code' => $subCode,
+                        'item' => $questionCodeRaw . '.' . $subCodeRaw,
+                    ]);
+
+                    return ['pairs' => []];
+                }
+
                 return [
                     'error' => [
                         'code' => 'MAPPING_NOT_FOUND',
@@ -449,6 +465,17 @@ class SyncService
         if ($questionType === 'file_upload') {
             $mainRef = $this->limeSurveyAdapter->resolveInternalRef($sid, $version, $questionCode, null);
             if (!$mainRef) {
+                if ($this->shouldIgnoreMissingMappingInRescue($questionCode, null, $rescueContext)) {
+                    Log::warning('Rescue mode: ignored missing file_upload mapping.', [
+                        'sid' => $sid,
+                        'version' => $version,
+                        'question_code' => $questionCode,
+                        'item' => $questionCodeRaw,
+                    ]);
+
+                    return ['pairs' => []];
+                }
+
                 return [
                     'error' => [
                         'code' => 'MAPPING_NOT_FOUND',
@@ -487,6 +514,18 @@ class SyncService
 
                 $internalRef = $this->limeSurveyAdapter->resolveInternalRef($sid, $version, $questionCode, $sqCode);
                 if (!$internalRef) {
+                    if ($this->shouldIgnoreMissingMappingInRescue($questionCode, $sqCode, $rescueContext)) {
+                        Log::warning('Rescue mode: ignored missing multi-select mapping.', [
+                            'sid' => $sid,
+                            'version' => $version,
+                            'question_code' => $questionCode,
+                            'subquestion_code' => $sqCode,
+                            'item' => ($questionCodeRaw !== '' ? $questionCodeRaw : $questionCode) . '.' . (string) $sqCodeRaw,
+                        ]);
+
+                        continue;
+                    }
+
                     return [
                         'error' => [
                             'code' => 'MAPPING_NOT_FOUND',
@@ -511,6 +550,17 @@ class SyncService
 
         $mainRef = $this->limeSurveyAdapter->resolveInternalRef($sid, $version, $questionCode, null);
         if (!$mainRef) {
+            if ($this->shouldIgnoreMissingMappingInRescue($questionCode, null, $rescueContext)) {
+                Log::warning('Rescue mode: ignored missing main mapping.', [
+                    'sid' => $sid,
+                    'version' => $version,
+                    'question_code' => $questionCode,
+                    'item' => $questionCodeRaw !== '' ? $questionCodeRaw : $questionCode,
+                ]);
+
+                return ['pairs' => []];
+            }
+
             return [
                 'error' => [
                     'code' => 'MAPPING_NOT_FOUND',
@@ -523,6 +573,48 @@ class SyncService
         $pairs[$mainRef] = $this->extractAnswerValue($answer);
 
         return ['pairs' => $pairs];
+    }
+
+    private function buildRescueContext(array $payload): array
+    {
+        $enabled = (bool) ($payload['rescue_mode'] ?? false);
+        $optionalCodesRaw = $payload['rescue_optional_question_codes'] ?? [];
+        $optionalCodes = [];
+
+        if (is_array($optionalCodesRaw)) {
+            foreach ($optionalCodesRaw as $code) {
+                $normalized = $this->limeSurveyAdapter->normalizeMappingCode((string) $code);
+                if ($normalized !== '') {
+                    $optionalCodes[$normalized] = true;
+                }
+            }
+        }
+
+        return [
+            'enabled' => $enabled,
+            'optional_codes' => $optionalCodes,
+        ];
+    }
+
+    private function shouldIgnoreMissingMappingInRescue(
+        string $questionCode,
+        ?string $subquestionCode,
+        array $rescueContext
+    ): bool {
+        if (($rescueContext['enabled'] ?? false) !== true) {
+            return false;
+        }
+
+        if ($subquestionCode !== null) {
+            return false;
+        }
+
+        $optionalCodes = $rescueContext['optional_codes'] ?? [];
+        if (!is_array($optionalCodes) || empty($optionalCodes)) {
+            return false;
+        }
+
+        return isset($optionalCodes[$questionCode]);
     }
 
     private function buildQuestionTypeMap(array $formPayload): array
