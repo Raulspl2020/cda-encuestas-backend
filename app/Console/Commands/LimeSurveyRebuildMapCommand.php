@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Adapters\LimeSurveyAdapter;
+use App\Models\FormVersionCache;
 use Illuminate\Console\Command;
 
 class LimeSurveyRebuildMapCommand extends Command
@@ -26,11 +27,21 @@ class LimeSurveyRebuildMapCommand extends Command
             return self::FAILURE;
         }
 
-        $payload = $this->limeSurveyAdapter->getFormByVersion($sid, $version);
-        if (!is_array($payload)) {
-            $this->error("Form version not found in cache for sid={$sid}, version={$version}");
+        $payload = $this->limeSurveyAdapter->buildFallbackFormPayload($sid, $version);
+        if (empty($payload['questions'])) {
+            $this->error("Unable to build form payload from LimeSurvey for sid={$sid}, version={$version}");
             return self::FAILURE;
         }
+
+        FormVersionCache::query()->updateOrCreate(
+            ['sid' => $sid, 'version' => $version],
+            [
+                'version_hash' => (string) ($payload['version_hash'] ?? hash('sha256', $sid . '|' . $version)),
+                'is_active' => true,
+                'published_at' => now(),
+                'payload_json' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            ]
+        );
 
         $stats = $this->limeSurveyAdapter->syncQuestionMapFromPayload($sid, $version, $payload);
         $coverage = $this->limeSurveyAdapter->validateMappingCoverage($sid, $version, $payload);

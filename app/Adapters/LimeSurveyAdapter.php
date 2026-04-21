@@ -513,7 +513,6 @@ class LimeSurveyAdapter
             ->get(['qid', 'gid', 'title', 'parent_qid', 'question_order']);
 
         $parentsByCode = [];
-        $parentsByGidOrder = [];
         $childrenByParentAndCode = [];
         foreach ($questions as $q) {
             $qid = (int) $q->qid;
@@ -530,7 +529,6 @@ class LimeSurveyAdapter
                     'order' => (int) ($q->question_order ?? 0),
                 ];
                 $parentsByCode[$title] = $parent;
-                $parentsByGidOrder[$this->gidOrderKey((int) $q->gid, (int) ($q->question_order ?? 0))] = $parent;
             } else {
                 if (!isset($childrenByParentAndCode[$parentQid])) {
                     $childrenByParentAndCode[$parentQid] = [];
@@ -561,13 +559,6 @@ class LimeSurveyAdapter
             }
 
             $parent = $parentsByCode[$questionCode] ?? null;
-            if ($parent === null) {
-                $gid = (int) ($question['gid'] ?? 0);
-                $order = (int) ($question['order'] ?? 0);
-                if ($gid > 0) {
-                    $parent = $parentsByGidOrder[$this->gidOrderKey($gid, $order)] ?? null;
-                }
-            }
 
             if ($parent === null) {
                 $missingQuestionCodes[] = $rawQuestionCode;
@@ -644,11 +635,6 @@ class LimeSurveyAdapter
     private function mappingKey(string $questionCode, ?string $subquestionCode): string
     {
         return $questionCode . '|' . ($subquestionCode ?? '__MAIN__');
-    }
-
-    private function gidOrderKey(int $gid, int $order): string
-    {
-        return $gid . '|' . $order;
     }
 
     private function getSurveyLanguage(int $sid): string

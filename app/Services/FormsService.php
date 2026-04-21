@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Adapters\LimeSurveyAdapter;
 use App\Models\FormVersionCache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Carbon;
 
 class FormsService
@@ -90,14 +91,29 @@ class FormsService
             ->where('version', $version)
             ->first();
 
+        $livePayload = $this->limeSurveyAdapter->buildFallbackFormPayload($sid, $version);
+        if (empty($livePayload['questions'])) {
+            if ($cached) {
+                $decoded = json_decode((string) $cached->payload_json, true);
+                return is_array($decoded) ? $decoded : null;
+            }
+
+            return null;
+        }
+
         if ($cached) {
             $decoded = json_decode((string) $cached->payload_json, true);
             if (is_array($decoded)) {
-                return $decoded;
+                if (!$this->hasQuestionStructureDrift($decoded, $livePayload)) {
+                    return $decoded;
+                }
+
+                Log::warning('Cached form payload drift detected. Refreshing cache from LimeSurvey.', [
+                    'sid' => $sid,
+                    'version' => $version,
+                ]);
             }
         }
-
-        $payload = $this->limeSurveyAdapter->buildFallbackFormPayload($sid, $version);
 
         FormVersionCache::query()->updateOrCreate(
             [
@@ -105,14 +121,74 @@ class FormsService
                 'version' => $version,
             ],
             [
-                'version_hash' => (string) ($payload['version_hash'] ?? hash('sha256', $sid . '|' . $version)),
+                'version_hash' => (string) ($livePayload['version_hash'] ?? hash('sha256', $sid . '|' . $version)),
                 'is_active' => true,
                 'published_at' => now(),
-                'payload_json' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'payload_json' => json_encode($livePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
             ]
         );
 
-        return $payload;
+        return $livePayload;
+    }
+
+    private function hasQuestionStructureDrift(array $cachedPayload, array $livePayload): bool
+    {
+        $cachedCodes = $this->questionCodes($cachedPayload);
+        $liveCodes = $this->questionCodes($livePayload);
+
+        if ($cachedCodes !== $liveCodes) {
+            return true;
+        }
+
+        $cachedSubs = $this->subquestionKeys($cachedPayload);
+        $liveSubs = $this->subquestionKeys($livePayload);
+
+        return $cachedSubs !== $liveSubs;
+    }
+
+    private function questionCodes(array $payload): array
+    {
+        $codes = [];
+        foreach (($payload['questions'] ?? []) as $question) {
+            if (!is_array($question)) {
+                continue;
+            }
+            $code = strtoupper(trim((string) ($question['code'] ?? '')));
+            if ($code !== '') {
+                $codes[] = $code;
+            }
+        }
+
+        sort($codes);
+        return $codes;
+    }
+
+    private function subquestionKeys(array $payload): array
+    {
+        $keys = [];
+        foreach (($payload['questions'] ?? []) as $question) {
+            if (!is_array($question)) {
+                continue;
+            }
+
+            $qCode = strtoupper(trim((string) ($question['code'] ?? '')));
+            if ($qCode === '') {
+                continue;
+            }
+
+            foreach (($question['subquestions'] ?? []) as $subquestion) {
+                if (!is_array($subquestion)) {
+                    continue;
+                }
+                $sCode = strtoupper(trim((string) ($subquestion['code'] ?? '')));
+                if ($sCode !== '') {
+                    $keys[] = $qCode . '.' . $sCode;
+                }
+            }
+        }
+
+        sort($keys);
+        return $keys;
     }
 
     public function getFormVersionSyncReadiness(int $sid, string $version, array $payload): array
