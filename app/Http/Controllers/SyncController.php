@@ -22,6 +22,9 @@ class SyncController extends Controller
             'interviews.*.form_version' => ['required', 'string'],
             'interviews.*.answers' => ['nullable', 'array'],
             'interviews.*.answers.*.question_code' => ['required', 'string'],
+            'interviews.*.answers.*.subquestion_code' => ['nullable', 'string'],
+            'interviews.*.answers.*.value' => ['nullable'],
+            'interviews.*.answers.*.response' => ['nullable'],
         ]);
 
         $result = $this->syncService->processBatch($request, $payload);
