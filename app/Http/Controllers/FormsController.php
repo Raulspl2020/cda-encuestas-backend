@@ -37,6 +37,25 @@ class FormsController extends Controller
             ], 404);
         }
 
+        $syncReadiness = $this->formsService->getFormVersionSyncReadiness($sid, $version, $payload);
+        if (!$syncReadiness['ready']) {
+            return new JsonResponse([
+                'request_id' => (string) Str::uuid(),
+                'error' => [
+                    'code' => 'FORM_MAPPING_INCOMPLETE',
+                    'message' => 'Form version is not ready for offline sync. Missing required mapping.',
+                    'item' => $syncReadiness['missing_required_codes'][0] ?? null,
+                ],
+                'data' => [
+                    'sid' => $sid,
+                    'version' => $version,
+                    'sync_readiness' => $syncReadiness,
+                ],
+            ], 409);
+        }
+
+        $payload['sync_readiness'] = $syncReadiness;
+
         return new JsonResponse([
             'request_id' => (string) Str::uuid(),
             'data' => $payload,

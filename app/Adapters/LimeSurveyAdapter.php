@@ -5,10 +5,13 @@ namespace App\Adapters;
 use App\Models\FormQuestionMap;
 use App\Models\FormVersionCache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
 class LimeSurveyAdapter
 {
+    private array $resolvedMapCache = [];
+
     public function getActiveForms(): array
     {
         return FormVersionCache::query()
@@ -56,18 +59,28 @@ class LimeSurveyAdapter
 
     public function resolveInternalRef($sid, $version, $questionCode, $subquestionCode = null): ?string
     {
-        $query = FormQuestionMap::query()
-            ->where('sid', (int) $sid)
-            ->where('version', (string) $version)
-            ->where('question_code', (string) $questionCode);
+        $map = $this->getResolvedMap((int) $sid, (string) $version);
+        $normalizedQuestionCode = $this->normalizeMappingCode((string) $questionCode);
+        $normalizedSubquestionCode = $subquestionCode === null
+            ? null
+            : $this->normalizeMappingCode((string) $subquestionCode);
 
-        if ($subquestionCode === null) {
-            $query->whereNull('subquestion_code');
-        } else {
-            $query->where('subquestion_code', (string) $subquestionCode);
+        $mapKey = $this->mappingKey($normalizedQuestionCode, $normalizedSubquestionCode);
+        if (array_key_exists($mapKey, $map)) {
+            return $map[$mapKey];
         }
 
-        return $query->value('internal_ref');
+        return null;
+    }
+
+    public function normalizeMappingCode(?string $value): string
+    {
+        $normalized = (string) ($value ?? '');
+        $normalized = preg_replace('/[\x{200B}-\x{200D}\x{FEFF}]/u', '', $normalized) ?? $normalized;
+        $normalized = trim($normalized);
+        $normalized = preg_replace('/\s+/u', '', $normalized) ?? $normalized;
+
+        return strtoupper($normalized);
     }
 
     public function persistInterview(array $interview, array $resolvedAnswers): array
@@ -372,31 +385,152 @@ class LimeSurveyAdapter
         ];
     }
 
-    public function syncQuestionMapFromPayload(int $sid, string $version, array $payload): void
+    public function syncQuestionMapFromPayload(int $sid, string $version, array $payload): array
     {
+        $analysis = $this->analyzePayloadMapping($sid, $version, $payload);
+
         FormQuestionMap::query()->where('sid', $sid)->where('version', $version)->delete();
 
+        if (!empty($analysis['rows'])) {
+            FormQuestionMap::query()->insert($analysis['rows']);
+        }
+
+        unset($this->resolvedMapCache[$this->resolvedMapCacheKey($sid, $version)]);
+
+        return [
+            'sid' => $sid,
+            'version' => $version,
+            'total_questions' => $analysis['total_questions'],
+            'mapped_questions' => $analysis['mapped_questions'],
+            'mapped_rows' => count($analysis['rows']),
+            'missing_question_codes' => $analysis['missing_question_codes'],
+            'missing_subquestion_codes' => $analysis['missing_subquestion_codes'],
+        ];
+    }
+
+    public function validateMappingCoverage(int $sid, string $version, array $payload): array
+    {
+        $questions = ($payload['questions'] ?? []);
+        if (!is_array($questions)) {
+            return [
+                'ready' => false,
+                'missing_required_codes' => [],
+                'missing_codes' => [],
+                'total_questions' => 0,
+                'mapped_questions' => 0,
+            ];
+        }
+
+        $missingRequired = [];
+        $missingAny = [];
+        $mappedQuestions = 0;
+
+        foreach ($questions as $question) {
+            if (!is_array($question)) {
+                continue;
+            }
+
+            $questionCode = (string) ($question['code'] ?? '');
+            if ($questionCode === '') {
+                continue;
+            }
+
+            $mainRef = $this->resolveInternalRef($sid, $version, $questionCode, null);
+            if ($mainRef === null) {
+                $missingAny[] = $questionCode;
+                if (($question['mandatory'] ?? false) === true) {
+                    $missingRequired[] = $questionCode;
+                }
+                continue;
+            }
+
+            $mappedQuestions++;
+        }
+
+        return [
+            'ready' => empty($missingRequired),
+            'missing_required_codes' => array_values(array_unique($missingRequired)),
+            'missing_codes' => array_values(array_unique($missingAny)),
+            'total_questions' => count($questions),
+            'mapped_questions' => $mappedQuestions,
+        ];
+    }
+
+    public function ensureQuestionMap(int $sid, string $version, array $payload): array
+    {
+        $rebuilt = $this->syncQuestionMapFromPayload($sid, $version, $payload);
+        $coverage = $this->validateMappingCoverage($sid, $version, $payload);
+
+        if (!$coverage['ready']) {
+            Log::warning('Question mapping coverage incomplete after rebuild.', [
+                'sid' => $sid,
+                'version' => $version,
+                'missing_required_codes' => $coverage['missing_required_codes'],
+                'missing_codes' => $coverage['missing_codes'],
+            ]);
+        }
+
+        return array_merge($rebuilt, $coverage);
+    }
+
+    private function getResolvedMap(int $sid, string $version): array
+    {
+        $cacheKey = $this->resolvedMapCacheKey($sid, $version);
+        if (isset($this->resolvedMapCache[$cacheKey])) {
+            return $this->resolvedMapCache[$cacheKey];
+        }
+
+        $map = [];
+        $rows = FormQuestionMap::query()
+            ->where('sid', $sid)
+            ->where('version', $version)
+            ->get(['question_code', 'subquestion_code', 'internal_ref']);
+
+        foreach ($rows as $row) {
+            $questionCode = $this->normalizeMappingCode((string) ($row->question_code ?? ''));
+            if ($questionCode === '') {
+                continue;
+            }
+
+            $subCodeRaw = $row->subquestion_code;
+            $subCode = $subCodeRaw === null
+                ? null
+                : $this->normalizeMappingCode((string) $subCodeRaw);
+            $map[$this->mappingKey($questionCode, $subCode)] = (string) $row->internal_ref;
+        }
+
+        $this->resolvedMapCache[$cacheKey] = $map;
+
+        return $map;
+    }
+
+    private function analyzePayloadMapping(int $sid, string $version, array $payload): array
+    {
         $prefix = (string) env('LS_DB_PREFIX', 'cda_');
         $questions = DB::connection('limesurvey')
             ->table($prefix . 'questions')
             ->where('sid', $sid)
-            ->get(['qid', 'gid', 'title', 'parent_qid']);
+            ->get(['qid', 'gid', 'title', 'parent_qid', 'question_order']);
 
         $parentsByCode = [];
+        $parentsByGidOrder = [];
         $childrenByParentAndCode = [];
         foreach ($questions as $q) {
             $qid = (int) $q->qid;
             $parentQid = (int) $q->parent_qid;
-            $title = (string) $q->title;
+            $title = $this->normalizeMappingCode((string) $q->title);
             if ($title === '') {
                 continue;
             }
 
             if ($parentQid === 0) {
-                $parentsByCode[$title] = [
+                $parent = [
                     'qid' => $qid,
                     'gid' => (int) $q->gid,
+                    'order' => (int) ($q->question_order ?? 0),
                 ];
+                $parentsByCode[$title] = $parent;
+                $parentsByGidOrder[$this->gidOrderKey((int) $q->gid, (int) ($q->question_order ?? 0))] = $parent;
             } else {
                 if (!isset($childrenByParentAndCode[$parentQid])) {
                     $childrenByParentAndCode[$parentQid] = [];
@@ -408,57 +542,113 @@ class LimeSurveyAdapter
             }
         }
 
-        foreach (($payload['questions'] ?? []) as $question) {
-            $questionCode = (string) ($question['code'] ?? '');
+        $rows = [];
+        $missingQuestionCodes = [];
+        $missingSubquestionCodes = [];
+        $mappedQuestions = 0;
+        $now = now();
+        $questionsFromPayload = ($payload['questions'] ?? []);
+
+        foreach ($questionsFromPayload as $question) {
+            if (!is_array($question)) {
+                continue;
+            }
+
+            $rawQuestionCode = (string) ($question['code'] ?? '');
+            $questionCode = $this->normalizeMappingCode($rawQuestionCode);
             if ($questionCode === '') {
                 continue;
             }
 
             $parent = $parentsByCode[$questionCode] ?? null;
             if ($parent === null) {
+                $gid = (int) ($question['gid'] ?? 0);
+                $order = (int) ($question['order'] ?? 0);
+                if ($gid > 0) {
+                    $parent = $parentsByGidOrder[$this->gidOrderKey($gid, $order)] ?? null;
+                }
+            }
+
+            if ($parent === null) {
+                $missingQuestionCodes[] = $rawQuestionCode;
                 continue;
             }
 
+            $mappedQuestions++;
             $baseRef = $sid . 'X' . $parent['gid'] . 'X' . $parent['qid'];
-
-            FormQuestionMap::query()->create([
+            $rows[$this->mappingKey($questionCode, null)] = [
                 'sid' => $sid,
                 'version' => $version,
                 'question_code' => $questionCode,
                 'subquestion_code' => null,
                 'internal_ref' => $baseRef,
-            ]);
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
 
             foreach (($question['subquestions'] ?? []) as $subquestion) {
-                $subCode = (string) ($subquestion['code'] ?? '');
+                if (!is_array($subquestion)) {
+                    continue;
+                }
+
+                $rawSubCode = (string) ($subquestion['code'] ?? '');
+                $subCode = $this->normalizeMappingCode($rawSubCode);
                 if ($subCode === '') {
                     continue;
                 }
 
                 $child = $childrenByParentAndCode[$parent['qid']][$subCode] ?? null;
                 if ($child === null) {
+                    $missingSubquestionCodes[] = $rawQuestionCode . '.' . $rawSubCode;
                     continue;
                 }
 
-                FormQuestionMap::query()->create([
+                $rows[$this->mappingKey($questionCode, $subCode)] = [
                     'sid' => $sid,
                     'version' => $version,
                     'question_code' => $questionCode,
                     'subquestion_code' => $subCode,
                     'internal_ref' => $baseRef . $subCode,
-                ]);
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
             }
 
             if (($question['supports_other'] ?? false) === true) {
-                FormQuestionMap::query()->create([
+                $rows[$this->mappingKey($questionCode, 'OTHER')] = [
                     'sid' => $sid,
                     'version' => $version,
                     'question_code' => $questionCode,
-                    'subquestion_code' => 'other',
+                    'subquestion_code' => 'OTHER',
                     'internal_ref' => $baseRef . 'other',
-                ]);
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
             }
         }
+
+        return [
+            'rows' => array_values($rows),
+            'total_questions' => is_array($questionsFromPayload) ? count($questionsFromPayload) : 0,
+            'mapped_questions' => $mappedQuestions,
+            'missing_question_codes' => array_values(array_unique($missingQuestionCodes)),
+            'missing_subquestion_codes' => array_values(array_unique($missingSubquestionCodes)),
+        ];
+    }
+
+    private function resolvedMapCacheKey(int $sid, string $version): string
+    {
+        return $sid . '|' . $version;
+    }
+
+    private function mappingKey(string $questionCode, ?string $subquestionCode): string
+    {
+        return $questionCode . '|' . ($subquestionCode ?? '__MAIN__');
+    }
+
+    private function gidOrderKey(int $gid, int $order): string
+    {
+        return $gid . '|' . $order;
     }
 
     private function getSurveyLanguage(int $sid): string

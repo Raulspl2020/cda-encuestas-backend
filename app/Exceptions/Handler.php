@@ -4,6 +4,7 @@ namespace App\Exceptions;
 
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
@@ -28,7 +29,12 @@ class Handler extends ExceptionHandler
     public function register(): void
     {
         $this->reportable(function (Throwable $e) {
-            //
+            Log::error('Unhandled exception reported.', [
+                'exception' => get_class($e),
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
         });
     }
 
@@ -50,6 +56,15 @@ class Handler extends ExceptionHandler
 
         $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
         $message = $status === 404 ? 'Resource not found.' : 'Internal server error.';
+
+        Log::error('HTTP request failed with exception.', [
+            'request_id' => $requestId,
+            'status' => $status,
+            'exception' => get_class($e),
+            'message' => $e->getMessage(),
+            'path' => $request->path(),
+            'method' => $request->method(),
+        ]);
 
         return new JsonResponse([
             'request_id' => $requestId,

@@ -16,11 +16,12 @@ class SyncController extends Controller
     {
         $payload = $request->validate([
             'batch_id' => ['nullable', 'string'],
-            'interviews' => ['required', 'array'],
+            'interviews' => ['required', 'array', 'min:1'],
             'interviews.*.interview_uuid' => ['required', 'string'],
             'interviews.*.form_sid' => ['required', 'integer'],
             'interviews.*.form_version' => ['required', 'string'],
             'interviews.*.answers' => ['nullable', 'array'],
+            'interviews.*.answers.*.question_code' => ['required', 'string'],
         ]);
 
         $result = $this->syncService->processBatch($request, $payload);

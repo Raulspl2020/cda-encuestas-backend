@@ -9,6 +9,7 @@ use App\Models\SyncBatch;
 use App\Models\SyncInterview;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SyncService
@@ -23,11 +24,13 @@ class SyncService
     {
         $route = 'api/v1/sync/responses/batch';
         $idempotencyKey = (string) $request->header('Idempotency-Key', '');
+        $requestId = (string) Str::uuid();
 
         if ($idempotencyKey === '') {
             return [
                 'status_code' => 400,
                 'body' => [
+                    'request_id' => $requestId,
                     'error' => [
                         'code' => 'MISSING_IDEMPOTENCY_KEY',
                         'message' => 'Idempotency-Key header is required.',
@@ -44,6 +47,7 @@ class SyncService
                 return [
                     'status_code' => 409,
                     'body' => [
+                        'request_id' => $requestId,
                         'error' => [
                             'code' => 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD',
                             'message' => 'Idempotency key already used with a different payload.',
@@ -57,6 +61,7 @@ class SyncService
             return [
                 'status_code' => (int) ($existing->status_code ?? 200),
                 'body' => is_array($saved) ? $saved : [
+                    'request_id' => $requestId,
                     'error' => [
                         'code' => 'INVALID_IDEMPOTENCY_SNAPSHOT',
                         'message' => 'Stored idempotency snapshot is invalid.',
@@ -66,8 +71,14 @@ class SyncService
         }
 
         $device = $this->resolveDevice($request);
+        Log::info('Sync batch request received.', [
+            'request_id' => $requestId,
+            'idempotency_key' => $idempotencyKey,
+            'device_uuid' => $device->device_uuid,
+            'interviews_count' => count($payload['interviews'] ?? []),
+        ]);
 
-        $result = DB::transaction(function () use ($payload, $idempotencyKey, $device) {
+        $result = DB::transaction(function () use ($payload, $idempotencyKey, $device, $requestId) {
             $batch = SyncBatch::query()->create([
                 'batch_uuid' => (string) Str::uuid(),
                 'idempotency_key' => $idempotencyKey,
@@ -80,20 +91,24 @@ class SyncService
             $accepted = 0;
             $rejected = 0;
             $results = [];
+            $preparedForms = [];
 
             foreach (($payload['interviews'] ?? []) as $interview) {
                 $interviewUuid = (string) ($interview['interview_uuid'] ?? '');
 
                 if ($interviewUuid === '') {
                     $rejected++;
+                    $error = [
+                        'code' => 'INVALID_PAYLOAD',
+                        'message' => 'Interview UUID is required.',
+                        'item' => 'interviews.*.interview_uuid',
+                    ];
                     $results[] = [
                         'interview_uuid' => '',
                         'status' => 'rejected',
-                        'error' => [
-                            'code' => 'INVALID_PAYLOAD',
-                            'message' => 'Interview UUID is required.',
-                        ],
+                        'error' => $error,
                     ];
+                    $this->logInterviewIssue($requestId, $batch->batch_uuid, '', 0, '', $error, $interview);
                     continue;
                 }
 
@@ -113,14 +128,17 @@ class SyncService
                 if ($sid <= 0 || $version === '') {
                     $this->storeRejectedInterview($batch->id, $interviewUuid, $sid, $version, 'INVALID_INTERVIEW', 'Missing form_sid or form_version.');
                     $rejected++;
+                    $error = [
+                        'code' => 'INVALID_INTERVIEW',
+                        'message' => 'Missing form_sid or form_version.',
+                        'item' => 'form_sid/form_version',
+                    ];
                     $results[] = [
                         'interview_uuid' => $interviewUuid,
                         'status' => 'rejected',
-                        'error' => [
-                            'code' => 'INVALID_INTERVIEW',
-                            'message' => 'Missing form_sid or form_version.',
-                        ],
+                        'error' => $error,
                     ];
+                    $this->logInterviewIssue($requestId, $batch->batch_uuid, $interviewUuid, $sid, $version, $error, $interview);
                     continue;
                 }
 
@@ -132,20 +150,67 @@ class SyncService
                 if (!$hasVersion) {
                     $this->storeRejectedInterview($batch->id, $interviewUuid, $sid, $version, 'FORM_VERSION_NOT_FOUND', 'Form version does not exist in cache.');
                     $rejected++;
+                    $error = [
+                        'code' => 'FORM_VERSION_NOT_FOUND',
+                        'message' => 'Form version does not exist in cache.',
+                        'item' => 'form_version',
+                    ];
                     $results[] = [
                         'interview_uuid' => $interviewUuid,
                         'status' => 'rejected',
-                        'error' => [
-                            'code' => 'FORM_VERSION_NOT_FOUND',
-                            'message' => 'Form version does not exist in cache.',
-                        ],
+                        'error' => $error,
                     ];
+                    $this->logInterviewIssue($requestId, $batch->batch_uuid, $interviewUuid, $sid, $version, $error, $interview);
                     continue;
                 }
 
-                $payload = $this->limeSurveyAdapter->getFormByVersion($sid, $version);
-                if (is_array($payload)) {
-                    $this->limeSurveyAdapter->syncQuestionMapFromPayload($sid, $version, $payload);
+                $formKey = $sid . '|' . $version;
+                if (!isset($preparedForms[$formKey])) {
+                    $formPayload = $this->limeSurveyAdapter->getFormByVersion($sid, $version);
+                    if (!is_array($formPayload)) {
+                        $preparedForms[$formKey] = [
+                            'ready' => false,
+                            'missing_required_codes' => [],
+                            'missing_codes' => [],
+                            'error' => [
+                                'code' => 'FORM_VERSION_PAYLOAD_NOT_FOUND',
+                                'message' => 'Unable to load cached form payload for mapping.',
+                                'item' => 'form_version_payload',
+                            ],
+                        ];
+                    } else {
+                        $preparedForms[$formKey] = $this->limeSurveyAdapter->ensureQuestionMap($sid, $version, $formPayload);
+                    }
+                }
+
+                $prepared = $preparedForms[$formKey];
+                if (($prepared['ready'] ?? false) !== true) {
+                    $missingCode = $prepared['missing_required_codes'][0] ?? null;
+                    $error = $prepared['error'] ?? [
+                        'code' => 'FORM_MAPPING_INCOMPLETE',
+                        'message' => $missingCode !== null
+                            ? 'No existe mapping para la pregunta obligatoria ' . $missingCode
+                            : 'Form question mapping is incomplete for this version.',
+                        'item' => $missingCode ?? 'form_mapping',
+                    ];
+
+                    $this->storeRejectedInterview(
+                        $batch->id,
+                        $interviewUuid,
+                        $sid,
+                        $version,
+                        (string) ($error['code'] ?? 'FORM_MAPPING_INCOMPLETE'),
+                        (string) ($error['message'] ?? 'Form question mapping is incomplete.')
+                    );
+
+                    $rejected++;
+                    $results[] = [
+                        'interview_uuid' => $interviewUuid,
+                        'status' => 'rejected',
+                        'error' => $error,
+                    ];
+                    $this->logInterviewIssue($requestId, $batch->batch_uuid, $interviewUuid, $sid, $version, $error, $interview);
+                    continue;
                 }
 
                 $resolvedAnswers = [];
@@ -179,6 +244,7 @@ class SyncService
                         'status' => 'rejected',
                         'error' => $mappingError,
                     ];
+                    $this->logInterviewIssue($requestId, $batch->batch_uuid, $interviewUuid, $sid, $version, $mappingError, $interview);
                     continue;
                 }
 
@@ -194,14 +260,17 @@ class SyncService
                     );
 
                     $rejected++;
+                    $error = [
+                        'code' => 'PERSIST_FAILED',
+                        'message' => (string) ($persistResult['error'] ?? 'Unknown persist failure'),
+                        'item' => 'limesurvey.insert',
+                    ];
                     $results[] = [
                         'interview_uuid' => $interviewUuid,
                         'status' => 'rejected',
-                        'error' => [
-                            'code' => 'PERSIST_FAILED',
-                            'message' => (string) ($persistResult['error'] ?? 'Unknown persist failure'),
-                        ],
+                        'error' => $error,
                     ];
+                    $this->logInterviewIssue($requestId, $batch->batch_uuid, $interviewUuid, $sid, $version, $error, $interview);
                     continue;
                 }
 
@@ -232,10 +301,21 @@ class SyncService
             $batch->processed_at = now();
             $batch->save();
 
+            $statusCode = $batch->status === 'success' ? 200 : 207;
+
+            Log::info('Sync batch processed.', [
+                'request_id' => $requestId,
+                'batch_id' => $batch->batch_uuid,
+                'status' => $batch->status,
+                'accepted' => $accepted,
+                'rejected' => $rejected,
+                'http_status' => $statusCode,
+            ]);
+
             return [
-                'status_code' => 200,
+                'status_code' => $statusCode,
                 'body' => [
-                    'request_id' => (string) Str::uuid(),
+                    'request_id' => $requestId,
                     'data' => [
                         'batch_id' => $batch->batch_uuid,
                         'batch_status' => $batch->status,
@@ -258,6 +338,42 @@ class SyncService
         return $result;
     }
 
+    private function logInterviewIssue(
+        string $requestId,
+        string $batchId,
+        string $interviewUuid,
+        int $sid,
+        string $version,
+        array $error,
+        array $interview
+    ): void {
+        $answers = $interview['answers'] ?? [];
+        $answerCodes = [];
+        if (is_array($answers)) {
+            foreach ($answers as $answer) {
+                if (is_array($answer)) {
+                    $code = (string) ($answer['question_code'] ?? '');
+                    if ($code !== '') {
+                        $answerCodes[] = $code;
+                    }
+                }
+            }
+        }
+
+        Log::warning('Sync interview rejected.', [
+            'request_id' => $requestId,
+            'batch_id' => $batchId,
+            'interview_uuid' => $interviewUuid,
+            'form_sid' => $sid,
+            'form_version' => $version,
+            'error' => $error,
+            'payload_summary' => [
+                'answers_count' => is_array($answers) ? count($answers) : 0,
+                'answer_codes' => array_slice($answerCodes, 0, 20),
+            ],
+        ]);
+    }
+
     private function resolveDevice(Request $request): MobileDevice
     {
         $deviceId = (string) $request->header('X-Device-Id', '');
@@ -277,7 +393,8 @@ class SyncService
 
     private function mapAnswerToInternalRefs(int $sid, string $version, array $answer, int $index): array
     {
-        $questionCode = (string) ($answer['question_code'] ?? '');
+        $questionCodeRaw = (string) ($answer['question_code'] ?? '');
+        $questionCode = $this->limeSurveyAdapter->normalizeMappingCode($questionCodeRaw);
         if ($questionCode === '') {
             return [
                 'error' => [
@@ -292,14 +409,15 @@ class SyncService
         $pairs = [];
 
         if (array_key_exists('subquestion_code', $answer) && $answer['subquestion_code'] !== null && trim((string) $answer['subquestion_code']) !== '') {
-            $subCode = (string) $answer['subquestion_code'];
+            $subCodeRaw = (string) $answer['subquestion_code'];
+            $subCode = $this->limeSurveyAdapter->normalizeMappingCode($subCodeRaw);
             $internalRef = $this->limeSurveyAdapter->resolveInternalRef($sid, $version, $questionCode, $subCode);
             if (!$internalRef) {
                 return [
                     'error' => [
                         'code' => 'MAPPING_NOT_FOUND',
                         'message' => 'No internal mapping found for answer.',
-                        'item' => $questionCode . '.' . $subCode,
+                        'item' => ($questionCodeRaw !== '' ? $questionCodeRaw : $questionCode) . '.' . ($subCodeRaw !== '' ? $subCodeRaw : $subCode),
                     ],
                 ];
             }
@@ -310,7 +428,7 @@ class SyncService
 
         if (is_array($value) && array_key_exists('selected_subquestion_codes', $value)) {
             foreach (($value['selected_subquestion_codes'] ?? []) as $sqCodeRaw) {
-                $sqCode = (string) $sqCodeRaw;
+                $sqCode = $this->limeSurveyAdapter->normalizeMappingCode((string) $sqCodeRaw);
                 if ($sqCode === '') {
                     continue;
                 }
@@ -321,7 +439,7 @@ class SyncService
                         'error' => [
                             'code' => 'MAPPING_NOT_FOUND',
                             'message' => 'No internal mapping found for multi-select subquestion.',
-                            'item' => $questionCode . '.' . $sqCode,
+                            'item' => ($questionCodeRaw !== '' ? $questionCodeRaw : $questionCode) . '.' . (string) $sqCodeRaw,
                         ],
                     ];
                 }

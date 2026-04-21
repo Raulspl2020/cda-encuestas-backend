@@ -93,7 +93,6 @@ class FormsService
         if ($cached) {
             $decoded = json_decode((string) $cached->payload_json, true);
             if (is_array($decoded)) {
-                $this->limeSurveyAdapter->syncQuestionMapFromPayload($sid, $version, $decoded);
                 return $decoded;
             }
         }
@@ -113,9 +112,20 @@ class FormsService
             ]
         );
 
-        $this->limeSurveyAdapter->syncQuestionMapFromPayload($sid, $version, $payload);
-
         return $payload;
+    }
+
+    public function getFormVersionSyncReadiness(int $sid, string $version, array $payload): array
+    {
+        $mapStatus = $this->limeSurveyAdapter->ensureQuestionMap($sid, $version, $payload);
+
+        return [
+            'ready' => (bool) ($mapStatus['ready'] ?? false),
+            'missing_required_codes' => $mapStatus['missing_required_codes'] ?? [],
+            'missing_codes' => $mapStatus['missing_codes'] ?? [],
+            'mapped_questions' => (int) ($mapStatus['mapped_questions'] ?? 0),
+            'total_questions' => (int) ($mapStatus['total_questions'] ?? 0),
+        ];
     }
 
     private function fetchActiveFormsFromLimeSurvey(): array
