@@ -346,6 +346,7 @@ class LimeSurveyAdapter
                 'gid' => (int) $q->gid,
                 'code' => (string) $q->title,
                 'type' => $mappedType,
+                'raw_type' => (string) $q->type,
                 'order' => (int) ($q->question_order ?? 0),
                 'text' => [
                     $language => (string) ($q->question_text ?? $q->title),
@@ -354,7 +355,8 @@ class LimeSurveyAdapter
                 'mandatory' => strtoupper((string) ($q->mandatory ?? 'N')) === 'Y',
                 'supports_multi_select' => $mappedType === 'multi_option',
                 'supports_other' => strtoupper((string) ($q->other ?? 'N')) === 'Y',
-                'attributes' => $attributesByQid[$qid] ?? [],
+                'supports_file_upload' => $mappedType === 'file_upload',
+                'attributes' => !empty($attributesByQid[$qid] ?? []) ? $attributesByQid[$qid] : (object) [],
                 'options' => $optionsByQid[$qid] ?? [],
                 'subquestions' => $subByParent[$qid] ?? [],
             ];
@@ -696,6 +698,7 @@ class LimeSurveyAdapter
             'Y' => 'yes_no',
             'L', '!', 'O' => 'single_option',
             'M', 'P' => 'multi_option',
+            '|' => 'file_upload',
             default => 'text',
         };
     }
