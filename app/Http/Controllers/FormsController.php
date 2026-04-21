@@ -55,10 +55,34 @@ class FormsController extends Controller
         }
 
         $payload['sync_readiness'] = $syncReadiness;
+        $payload = $this->normalizeForClient($payload);
 
         return new JsonResponse([
             'request_id' => (string) Str::uuid(),
             'data' => $payload,
         ]);
+    }
+
+    private function normalizeForClient(array $payload): array
+    {
+        $questions = $payload['questions'] ?? [];
+        if (!is_array($questions)) {
+            return $payload;
+        }
+
+        foreach ($questions as $idx => $question) {
+            if (!is_array($question)) {
+                continue;
+            }
+
+            $attributes = $question['attributes'] ?? null;
+            if (is_array($attributes) && array_is_list($attributes) && empty($attributes)) {
+                $question['attributes'] = (object) [];
+            }
+
+            $payload['questions'][$idx] = $question;
+        }
+
+        return $payload;
     }
 }
